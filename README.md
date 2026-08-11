@@ -1,138 +1,84 @@
-# HP LaserJet 1600/2600 Display Module Driver (`hp-laserjet-screen-esp`)
+# HP LaserJet Front Panel Display Driver & RPG Demo (`hp-laserjet-screen-esp`)
 
-An ESP-compatible driver specification and micro-library for interfacing with front-panel screen modules from HP Color LaserJet 1600 and 2600 series printers.
-
-Driven by the **Rohm BU6740AK** display controller.
+An ESP8266 hardware driver and embedded game demo (*VFD Quest*) for dual front-panel display modules salvaged from HP Color LaserJet 1600/2600 series printers. Driven by dual **Rohm BU6740AK** display controllers over a shared SPI bus.
 
 ---
 
-## 📌 Features
+## 📷 Hardware Overview
 
-* **16-Bit SPI Protocol**: Low-overhead hardware interface operating in SPI Mode 0.
-* **Dual-Nibble Packet Framing**: Helper encoding routines for command and ASCII character writes.
-* **Status LED Control**: Integrated driving for front-panel dual status LEDs (Yellow & Green).
-* **Hardware Button Polling**: Readback transaction handling for the 4-button front panel interface.
+| Front Panel (Dual Displays Running *VFD Quest*) | Rear Panel Wiring & PCB Interface |
+| :---: | :---: |
+| <img src="img/front.jpeg" alt="Front Panel VFD Quest Demo" width="400"/> | <img src="img/back.jpeg" alt="Rear PCB Hardware Wiring" width="400"/> |
 
 ---
 
-## 🔌 Pinout & Connector Reference
+## 🚀 Key Features
 
-The display module connects via a 6-pin FPC flex cable at **J701**. Logic levels are standard **3.3V**.
+* **Dual Display Architecture**: Drives two stacked display panels simultaneously using hardware Chip Select (`CS1` / `CS2`) line multiplexing.
+* **Full Controller Protocol Driver**: Low-level implementation of the 16-bit dual-nibble command/data framing required by the Rohm BU6740AK.
+* **Front Panel Button Input Engine**: Integrated bidirectional SPI polling for reading the 4 active-low physical pushbuttons with 40ms software debouncing.
+* **Status LED Control**: Independent driving of dual status indicator LEDs (Yellow & Green) per module.
+* **Included RPG Demo (`game.cpp`)**: *VFD Quest*, a full turn-based retro RPG with state machine UI, battle mechanics, shop, inventory, and animated combat logs.
 
+---
+
+## 🔌 Pinout & Hardware Connections
+
+### Display FPC (J701 Connector)
 | Pin | Name | Type | Description |
 | :---: | :--- | :---: | :--- |
 | **1** | `MISO` | Output | Master In Slave Out (Button state feedback) |
-| **2** | `3.3V` | Power | +3.3V DC Main Power Supply |
+| **2** | `3.3V` | Power | +3.3V DC Supply |
 | **3** | `GND`  | Power | Common Ground |
-| **4** | `MOSI` | Input  | Master Out Slave In (Data / Command frame line) |
+| **4** | `MOSI` | Input  | Master Out Slave In (Command/Data framing) |
 | **5** | `SCLK` | Input  | SPI Serial Clock |
 | **6** | `/CS`  | Input  | Active-Low Chip Select |
 
----
-
-## ⚡ SPI Bus & Timing Specifications
-
-| Parameter | Value / Setting |
-| :--- | :--- |
-| **Display Controller** | Rohm BU6740AK |
-| **Data Width** | 16-bit |
-| **Clock Frequency** | `1.0 MHz` |
-| **SPI Mode** | Mode 0 (`CPOL = 0`, `CPHA = 0`) |
-| **Chip Select (`/CS`)** | Active **LOW** during transactions |
-| **Inter-Nibble Delay** | `~9 µs` (Delay between 1st and 2nd transfers) |
-| **Post-Command Delay** | `~37 µs` (Execution delay after full byte frame) |
+### ESP8266 Interfacing Pin Map
+| ESP8266 Pin | Function | Target Hardware |
+| :--- | :--- | :--- |
+| **`D1` (GPIO 5)** | Hardware `/CS1` | Top Display Module Chip Select |
+| **`D2` (GPIO 4)** | Hardware `/CS2` | Bottom Display Module Chip Select |
+| **`D5` (GPIO 14)**| Hardware `SCLK` | Shared SPI Serial Clock Line |
+| **`D7` (GPIO 13)**| Hardware `MOSI` | Shared SPI MOSI Line |
+| **`D6` (GPIO 12)**| Hardware `MISO` | Shared SPI MISO Line |
 
 ---
 
-## 📝 Framing & Bitmask Rules
+## ⚡ SPI Protocol & Initialization Sequence
 
-Sending an 8-bit command or ASCII character requires **two 16-bit SPI transfers** to complete a single byte frame.
+### Bus Configuration
+* **Bus Speed**: 250 kHz
+* **Bit Order**: `MSBFIRST`
+* **SPI Mode**: Mode 0 (`CPOL = 0`, `CPHA = 0`)
+* **Transaction Delays**: ~15 µs between nibbles; ~45 µs after complete frame write.
 
-### 1. Command Transfers (`cmd`)
-Commands use prefix mask `0x2700`:
-* **Transfer 1 (Upper Nibble):** `0x2700 | ((cmd & 0xF0) << 4)`
-* **Transfer 2 (Lower Nibble):** `0x2700 | ((cmd & 0x0F) << 8)`
+### Transfer Framing Rules
+Writing an 8-bit command or data byte requires sending two sequential 16-bit SPI transfers:
 
-### 2. Data / Character Transfers (`ch`)
-ASCII character writes use prefix mask `0x6700`:
-* **Transfer 1 (Upper Nibble):** `0x6700 | ((ch & 0xF0) << 4)`
-* **Transfer 2 (Lower Nibble):** `0x6700 | ((ch & 0x0F) << 8)`
+1. **Command Writes (`0x2700` Prefix Mask)**:
+   * **Upper Nibble**: `0x2700 | (cmd & 0xF0)`
+   * **Lower Nibble**: `0x2700 | ((cmd & 0x0F) << 4)`
 
----
+2. **ASCII Data Writes (`0x6700` Prefix Mask)**:
+   * **Upper Nibble**: `0x6700 | (data & 0xF0)`
+   * **Lower Nibble**: `0x6700 | ((data & 0x0F) << 4)`
 
-## 💡 Status LED Control
+3. **Status LED Driving (`0x9000` Prefix Mask)**:
+   * **Transfer**: `0x9000 | ((state & 0x03) << 4)`
+   * **States**: `0` = Both Off, `1` = Yellow On, `2` = Green On, `3` = Both On.
 
-LEDs are driven using a **single 16-bit SPI transfer** with format `0x90x0`:
+4. **Button Polling**:
+   * Send `0x0700` frame to trigger button state capture. Read 16-bit SPI response frame; extract lower 4 bits (`rx & 0x000F`).
+   * **Logic**: Active-LOW (`0` = Pressed, `1` = Released).
 
-| Value (`x`) | LED State | Command Frame |
-| :---: | :--- | :---: |
-| `0` | Both LEDs OFF | `0x9000` |
-| `1` | Yellow LED ON | `0x9010` |
-| `2` | Green LED ON | `0x9020` |
-| `3` | Both LEDs ON | `0x9030` |
-
----
-
-## 🔘 Button Polling
-
-To poll front-panel button states:
-1. Send a single 16-bit word (`0x0700`) on `MOSI`.
-2. Simultaneously read the 16-bit response frame from `MISO`.
-3. Extract the lower 4 bits (`response & 0x000F`).
-
-> **Logic:** Active LOW (`0` = Pressed, `1` = Released).
-
-| Bit | Target Button | Active State |
-| :---: | :--- | :---: |
-| `Bit 0` | Button 1 | `0` |
-| `Bit 1` | Button 2 | `0` |
-| `Bit 2` | Button 3 | `0` |
-| `Bit 3` | Button 4 | `0` |
-
----
-
-## 💻 Driver Reference Implementation (C++)
+### Rohm BU6740AK Initialization Routine
+To initialize each module into 2-line mode prior to printing text, the driver sends the following 14-word hardware initialization sequence:
 
 ```cpp
-#include <SPI.h>
-
-#define PIN_CS 5
-
-void writeDualNibble(uint16_t prefixMask, uint8_t dataByte) {
-    uint16_t t1 = prefixMask | ((dataByte & 0xF0) << 4);
-    uint16_t t2 = prefixMask | ((dataByte & 0x0F) << 8);
-
-    digitalWrite(PIN_CS, LOW);
-    SPI.transfer16(t1);
-    delayMicroseconds(9);
-    SPI.transfer16(t2);
-    digitalWrite(PIN_CS, HIGH);
-
-    delayMicroseconds(37);
-}
-
-// Send command to Rohm BU6740AK
-void sendCommand(uint8_t cmd) {
-    writeDualNibble(0x2700, cmd);
-}
-
-// Write ASCII character to display
-void sendChar(char ch) {
-    writeDualNibble(0x6700, (uint8_t)ch);
-}
-
-// Set status LED state (0 = Off, 1 = Yellow, 2 = Green, 3 = Both)
-void setLEDs(uint8_t state) {
-    uint16_t frame = 0x9000 | ((state & 0x03) << 4);
-    digitalWrite(PIN_CS, LOW);
-    SPI.transfer16(frame);
-    digitalWrite(PIN_CS, HIGH);
-}
-
-// Poll button state bitmask (Returns lower 4 bits)
-uint8_t readButtons() {
-    digitalWrite(PIN_CS, LOW);
-    uint16_t response = SPI.transfer16(0x0700);
-    digitalWrite(PIN_CS, HIGH);
-    return (uint8_t)(response & 0x0F);
-}
+uint16_t initSeq[] = {
+  0x2730, 0x2730, 0x2730, 0x2720,
+  0x2720, 0x2790, 0x2710, 0x2780,
+  0x2750, 0x27e0, 0x2770, 0x2750,
+  0x2760, 0x27c0
+};
